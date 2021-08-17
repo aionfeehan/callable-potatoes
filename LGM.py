@@ -195,7 +195,7 @@ class LGM1F:
     def libor(self, t, T, T_tau, coverage=None):
         if coverage == None:
             coverage = (T_tau - T)
-        libors = (self.discount_factor(t, T_tau) / self.discount_factor(t, T)) / coverage
+        libors = (self.discount_factor(t, T_tau) / self.discount_factor(t, T) - 1) / coverage
         return libors
 
     @staticmethod
