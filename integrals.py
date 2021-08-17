@@ -28,15 +28,18 @@ class PiecewiseIntegral:
     def __call__(self, a, b=None):
         if b is None:
             b = a
-            a =  0
-        return self.integral_function(a, b)
+            a = 0
+        if a > b:
+            return - self.integral_function(b, a)
+        else:
+            return self.integral_function(a, b)
 
     def _integrate_constant(self) -> Callable:
 
         def integrate_function(a: float, b: float) -> float:
             used_term_structure, used_coefs, _ = self._truncate_term_structure(a, b)
             segment_integrals = used_coefs * torch.diff(used_term_structure)
-            res = torch.sum(segment_integrals).item()
+            res = torch.sum(segment_integrals)
             return res
 
         return integrate_function
@@ -96,16 +99,16 @@ def test_constant():
     }
 
     integral_1 = PiecewiseIntegral(**case_1)
-    assert integral_1(0, 1) == 1
-    assert integral_1(0, 2.5) == 2.5
-    assert integral_1(-1, 2) == 3
-    assert integral_1(0, 6) == 6
+    assert integral_1(0, 1).item() == 1
+    assert integral_1(0, 2.5).item() == 2.5
+    assert integral_1(-1, 2).item() == 3
+    assert integral_1(0, 6).item() == 6
 
     integral_2 = PiecewiseIntegral(**case_2)
-    assert integral_2(0, 1) == 0
-    assert integral_2(0, 2.5) == 2
-    assert integral_2(-1, 2) == 1
-    assert integral_2(3, 6) == 9
+    assert integral_2(0, 1).item() == 0
+    assert integral_2(0, 2.5).item() == 2
+    assert integral_2(-1, 2).item() == 1
+    assert integral_2(3, 6).item() == 9
 
     print('All constant test cases passed')
     return
@@ -125,13 +128,13 @@ def test_exponential():
         "_type": "exponential"
     }
     integral_1 = PiecewiseIntegral(**case_1)
-    assert integral_1(0, 1) == np.exp(1) - 1
-    assert integral_1(0, 4.5) == np.exp(4.5) - 1
+    assert integral_1(0, 1).item() == np.exp(1) - 1
+    assert integral_1(0, 4.5).item() == np.exp(4.5) - 1
 
     integral_2 = PiecewiseIntegral(**case_2)
-    assert integral_2(0, 1) == 0
-    assert integral_2(0, 2) == np.exp(2) - np.exp(1)
-    assert integral_2(0, 3) == (np.exp(2) - np.exp(1)) + 2 * (np.exp(3 * 2) - np.exp(2 * 2)) / 2
+    assert integral_2(0, 1).item() == 0
+    assert integral_2(0, 2).item() == np.exp(2) - np.exp(1)
+    assert integral_2(0, 3).item() == (np.exp(2) - np.exp(1)) + 2 * (np.exp(3 * 2) - np.exp(2 * 2)) / 2
 
     print("All exponential test cases passed")
     return
