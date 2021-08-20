@@ -5,6 +5,69 @@ from typing import Callable, Tuple
 torch.manual_seed(0)
 
 
+class TorchPolynomial:
+    def __init__(self, coefficients: torch.Tensor):
+        self.coefficients = coefficients
+        self.degree = len(coefficients) - 1
+
+    def __getitem__(self, item: int):
+        assert item <= self.degree
+        return self.coefficients[item]
+
+    def __add__(self, other):
+        polynome = self.sanitize_to_polynomial(other)
+        padded_1, padded_2 = self.pad_zeros(self.coefficients, polynome.coefficients)
+        return TorchPolynomial(padded_1 + padded_2)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        polynome = self.sanitize_to_polynomial(other)
+        padded_1, padded_2 = self.pad_zeros(self.coefficients, polynome.coefficients)
+        return TorchPolynomial(padded_1 - padded_2)
+
+    def __rsub__(self, other):
+        return self.sanitize_to_polynomial(other).__sub__(self)
+
+    def __mul__(self, other):
+        polynome = self.sanitize_to_polynomial(other)
+        new_coefs = []
+        new_deg = self.degree + polynome.degree
+        for k in range(new_deg + 1):
+            new_coefs.append(torch.sum([self[i] * polynome[k - i] for i in range(k)]))
+        return TorchPolynomial(torch.stack(new_coefs, dim=0))
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def derivative(self):
+        new_coefs = torch.stack([k * self[k] for k in range(1, self.degree + 1)], dim=0)
+        return TorchPolynomial(new_coefs)
+
+    def antiderivative(self, constant: float = 0):
+        new_coefficients = [torch.tensor(constant, dtype=torch.float64)]
+        new_coefficients.extend([coef / (k + 1) for k, coef in enumerate(self.coefficients)])
+        return TorchPolynomial(torch.stack(new_coefficients, dim=0))
+
+    @staticmethod
+    def sanitize_to_polynomial(other):
+        if isinstance(other, TorchPolynomial):
+            return other
+        elif isinstance(other, float) or isinstance(other, int):
+            return TorchPolynomial(torch.Tensor([other], dtype=torch.float64))
+        else:
+            raise TypeError(f"Unsupported type {type(other)}")
+
+    @staticmethod
+    def pad_zeros(polynome_1, polynome_2):
+        deg_1, deg_2 = len(polynome_1), len(polynome_2)
+        max_deg = max((deg_1, deg_2))
+        res_1 = torch.nn.functional(polynome_1, (0, max_deg - deg_1), "constant", 0)
+        res_2 = torch.nn.functional(polynome_2, (0, max_deg - deg_2), "constant", 0)
+        return res_1, res_2
+
+
 class PiecewiseIntegral:
     # Compute functions as piecewise constant integrals
     def __init__(
