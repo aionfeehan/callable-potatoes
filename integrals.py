@@ -7,8 +7,12 @@ torch.manual_seed(0)
 
 class TorchPolynomial:
     def __init__(self, coefficients: torch.Tensor):
-        self.coefficients = coefficients.double().reshape(-1)
-        self.degree = len(self.coefficients) - 1
+        if isinstance(coefficients, TorchPolynomial):
+            self.coefficients = coefficients.coefficients
+            self.degree = coefficients.degree
+        else:
+            self.coefficients = coefficients.double().reshape(-1)
+            self.degree = len(self.coefficients) - 1
 
     def __str__(self):
         return str(self.coefficients)
@@ -210,6 +214,98 @@ class SegmentFunction:
 
 
 class PiecewiseIntegral:
+    def __init__(
+            self,
+            term_structure: torch.Tensor,
+            coef_structure: List[torch.Tensor] = None,
+            polynomial_structure: Union[List[List[torch.Tensor]], List[List[TorchPolynomial]]] = None,
+            segment_functions: List[SegmentFunction] = None
+    ):
+        assert (coef_structure is not None) or (segment_functions is not None)
+        assert (coef_structure is None) or (len(term_structure) == len(coef_structure) + 1)
+        assert polynomial_structure is None or (len(polynomial_structure) == len(coef_structure))
+        self.term_structure = term_structure.double()
+        if segment_functions is None:
+            self.coef_structure = coef_structure
+            self.polynomial_structure = [[TorchPolynomial(p) for p in seg_polys] for seg_polys in polynomial_structure]
+            if polynomial_structure is None:
+                polynomial_structure = [[torch.tensor([1])] for k in range(len(coef_structure))]
+                polynomial_structure = [[TorchPolynomial(p[0])] for p in polynomial_structure]
+            self.segment_functions = [
+                SegmentFunction(coef_structure[k], polynomial_structure[k])
+                for k in range(len(coef_structure))]
+        else:
+            self.segment_functions = segment_functions
+            self.coef_structure = [f.exp_coefs for f in segment_functions]
+            self.polynomial_structure = [f.polynomes for f in segment_functions]
+
+    def __add__(self, other):
+        assert isinstance(other, PiecewiseIntegral)
+        assert torch.all(self.term_structure == other.term_structure)  # todo: at some point we could relax this
+        new_segment_functions = [
+            self.segment_functions[k] + other.segment_functions[k] for k in range(len(self.segment_functions))
+        ]
+        return PiecewiseIntegral(self.term_structure, segment_functions=new_segment_functions)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __mul__(self, other):
+        if isinstance(other, float) or isinstance(other, int):
+            new_segment_functions = [
+                f * other for f in self.segment_functions
+            ]
+        elif isinstance(other, PiecewiseIntegral):
+            assert torch.all(self.term_structure == other.term_structure)
+            new_segment_functions = [
+                self.segment_functions[k] * other.segment_functionns[k] for k in range(len(self.segment_functions))
+            ]
+        else:
+            raise TypeError(f"Unsupported type {type(other)}")
+        return PiecewiseIntegral(self.term_structure, segment_functions=new_segment_functions)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __sub__(self, other):
+        return self + (-1 * other)
+
+    def derivative(self):
+        self.segment_functions = [f.derivative() for f in self.segment_functions]
+        return
+
+    def antiderivative(self):
+        self.segment_functions = [f.antiderivative() for f in self.segment_functions]
+
+    def _truncate_term_structure(self, a: float, b: float) -> Tuple[torch.Tensor, List[int]]:
+        # get term structure defined over [a, b] and corresponding mask for coefficients
+        is_in_segment = (self.term_structure >= a) & (self.term_structure < b)
+        used_term_structure = self.term_structure[is_in_segment]
+        used_function_idxs = is_in_segment.nonzero()[0]
+
+        if a not in used_term_structure:
+            if a < self.term_structure[0]:
+                used_term_structure[0] = a
+            else:
+                used_term_structure = [a] + used_term_structure
+                used_function_idxs = [used_function_idxs[0] - 1] + used_function_idxs
+
+        if b not in used_term_structure:
+            used_term_structure[-1] = b
+
+        return used_term_structure, used_function_idxs
+
+    def __call__(self, a, b=None):
+        if b is None:
+            b = a
+            a = 0
+        term_structure, function_idxs = self._truncate_term_structure(a, b)
+        antiderivatives = [self.segment_functions[k].antiderivative() for k in function_idxs]
+        segment_values = [F(term_structure[k + 1]) - F(term_structure[k]) for k, F in enumerate(antiderivatives)]
+        return torch.sum(torch.cat(segment_values))
+
+
+class OldPiecewiseIntegral:
     # Compute functions as piecewise constant integrals
     def __init__(
             self,
