@@ -7,8 +7,8 @@ torch.manual_seed(0)
 
 class TorchPolynomial:
     def __init__(self, coefficients: torch.Tensor):
-        self.coefficients = coefficients.double()
-        self.degree = len(coefficients) - 1
+        self.coefficients = coefficients.double().reshape(-1)
+        self.degree = len(self.coefficients) - 1
 
     def __str__(self):
         return str(self.coefficients)
@@ -38,7 +38,11 @@ class TorchPolynomial:
         new_coefs = []
         new_deg = self.degree + polynome.degree
         for k in range(new_deg + 1):
-            new_coefs.append(torch.sum([self[i] * polynome[k - i] for i in range(k)]))
+            valid_coefs = torch.stack(
+                [torch.stack([self[i] * polynome[j] for j in range(min(i, polynome.degree) + 1)])
+                for i in range(min(k, self.degree) + 1)]
+            )
+            new_coefs.append(torch.sum(valid_coefs))
         return TorchPolynomial(torch.stack(new_coefs, dim=0))
 
     def __rmul__(self, other):
@@ -69,7 +73,10 @@ class TorchPolynomial:
         if isinstance(other, TorchPolynomial):
             return other
         elif isinstance(other, float) or isinstance(other, int):
-            return TorchPolynomial(torch.Tensor([other], dtype=torch.float64))
+            return TorchPolynomial(torch.tensor([other], dtype=torch.float64))
+        elif isinstance(other, torch.Tensor):
+            assert (not other.size()) or (len(other) == 1)
+            return TorchPolynomial(other)
         else:
             raise TypeError(f"Unsupported type {type(other)}")
 
@@ -77,8 +84,8 @@ class TorchPolynomial:
     def pad_zeros(polynome_1, polynome_2):
         deg_1, deg_2 = len(polynome_1), len(polynome_2)
         max_deg = max((deg_1, deg_2))
-        res_1 = torch.nn.functional(polynome_1, (0, max_deg - deg_1), "constant", 0)
-        res_2 = torch.nn.functional(polynome_2, (0, max_deg - deg_2), "constant", 0)
+        res_1 = torch.nn.functional.pad(polynome_1, (0, max_deg - deg_1), "constant", 0)
+        res_2 = torch.nn.functional.pad(polynome_2, (0, max_deg - deg_2), "constant", 0)
         return res_1, res_2
 
 
@@ -94,6 +101,10 @@ class SegmentFunction:
             self.polynomes = [TorchPolynomial(p) for p in polynomes]
         elif isinstance(polynomes[0], TorchPolynomial):
             self.polynomes = polynomes
+        self._align_by_exp_coef()
+
+    def __str__(self):
+        return "\n".join([f"{(str(p), self.exp_coefs[k])}" for k, p in enumerate(self.polynomes)])
 
     def __add__(self, other):
         other_function = self.coerce_to_segment_function(other)
@@ -129,7 +140,17 @@ class SegmentFunction:
         return self.__mul__(other)
 
     def __call__(self, t):
-        return torch.sum(torch.stack([p(t) * torch.exp(self.exp_coefs[k] * t) for k, p in enumerate(self.exp_coefs)]))
+        return torch.sum(torch.stack([p(t) * torch.exp(self.exp_coefs[k] * t) for k, p in enumerate(self.polynomes)]))
+
+    def __eq__(self, other):
+        other_sf = self.coerce_to_segment_function(other)
+        if len(other_sf.exp_coefs) != len(self.exp_coefs):
+            return False
+        else:
+            order = np.argsort(self.exp_coefs.detach())
+            polynomes_eq = all(self.polynomes[k] == other.polynomes[k] for k in order)
+            coefs_eq = all(self.exp_coefs[k] == other.exp_coefs[k] for k in order)
+            return polynomes_eq and coefs_eq
 
     def derivative(self):
         exp_coefs = torch.stack([self.exp_coefs.clone(), self.exp_coefs.clone()])
@@ -148,6 +169,24 @@ class SegmentFunction:
         while polynome.degree > 0:
             return polynome * 1 / exp_coef + self._single_antiderivative(polynome.derivative() * 1 / exp_coef, exp_coef)
         return polynome * 1 / exp_coef
+
+    def _align_by_exp_coef(self):
+        if len(self.exp_coefs) == len(np.unique(self.exp_coefs.detach())):
+            return
+        else:
+            values, counts = np.unique(self.exp_coefs.detach(), return_counts=True)
+            to_keep = []
+            for k, v in enumerate(values):
+                if counts[k] > 1:
+                    is_value = (np.array(self.exp_coefs.detach()) == v).nonzero()[0]
+                    idx_to_keep = is_value[0]
+                    for i in range(1, counts[k]):
+                        idx_to_drop = is_value[i]
+                        self.polynomes[idx_to_keep] += self.polynomes[idx_to_drop]
+                    to_keep.append(idx_to_keep)
+            self.exp_coefs = self.exp_coefs[to_keep]
+            self.polynomes = [self.polynomes[k] for k in to_keep]
+        return
 
     @staticmethod
     def coerce_to_segment_function(other):
@@ -267,6 +306,34 @@ def test_polynomes():
     return
 
 
+def test_segment_function():
+    case_1 = {
+        "exp_coefs": torch.tensor([-1]),
+        "polynomes": [torch.tensor([1, 1, 1])]
+    }
+
+    case_2 = {
+        "exp_coefs": torch.tensor([-1, -1]),
+        "polynomes": [torch.tensor([1, 1, 1]), torch.tensor([1, 1])]
+    }
+
+    case_2_bis = {
+        "exp_coefs": torch.tensor([-1]),
+        "polynomes": [torch.tensor([2, 2, 1])]
+    }
+    sf_2 = SegmentFunction(**case_2)
+    sf_2_bis = SegmentFunction(**case_2_bis)
+    assert sf_2 == sf_2_bis
+    sf = SegmentFunction(**case_1)
+    assert sf(0) == 1
+    assert sf(1).float() == 3 * torch.exp(torch.tensor(-1))
+    sf_d = sf.derivative()
+    sf_d_test = SegmentFunction(torch.tensor([-1]), torch.tensor([-1, -1, -1]) + torch.tensor([1, 2, 0]))
+    print(sf.antiderivative())
+    print("Segment function tests passed")
+    return
+
+
 def test_constant():
     case_1 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
@@ -321,5 +388,6 @@ def test_exponential():
 
 if __name__ == "__main__":
     test_polynomes()
+    test_segment_function()
     test_constant()
     test_exponential()
