@@ -132,13 +132,17 @@ class SegmentFunction:
         new_polynomes = []
         exp_coefs = []
         for i, poly_1, in enumerate(self.polynomes):
-            for j, poly_2 in enumerate(other.polynomes):
+            for j, poly_2 in enumerate(other_function.polynomes):
                 new_polynomes.append(poly_1 * poly_2)
-                exp_coefs.append(self.exp_coefs[i] + other.exp_coefs[j])
+                exp_coefs.append(self.exp_coefs[i] + other_function.exp_coefs[j])
         return SegmentFunction(
             torch.stack(exp_coefs, dim=0),
             new_polynomes
         )
+
+    @property
+    def degree(self):
+        return max([p.degree for p in self.polynomes])
 
     def __rmul__(self, other):
         return self.__mul__(other)
@@ -170,9 +174,13 @@ class SegmentFunction:
         )
 
     def _single_antiderivative(self, polynome, exp_coef):
-        while polynome.degree > 0:
-            return polynome * 1 / exp_coef + self._single_antiderivative(polynome.derivative() * 1 / exp_coef, exp_coef)
-        return polynome * 1 / exp_coef
+        if exp_coef == 0:
+            return polynome.antiderivative(0)
+        else:
+            while polynome.degree > 0:
+                return polynome * 1 / exp_coef + \
+                       self._single_antiderivative(polynome.derivative() * 1 / exp_coef, exp_coef)
+            return polynome * 1 / exp_coef
 
     def _align_by_exp_coef(self):
         if len(self.exp_coefs) == len(np.unique(self.exp_coefs.detach())):
@@ -211,6 +219,21 @@ class SegmentFunction:
             return torch.tensor([exp_coefs], dtype=torch.float64)
         else:
             raise TypeError(f"Unsupported type {type(exp_coefs)}")
+
+    def get_exponential(self):
+        assert self.degree <= 1
+        assert all(self.exp_coefs == 0)
+        constants = []
+        exps = torch.zeros(len(self.polynomes))
+        for k, p in enumerate(self.polynomes):
+            constants.append(TorchPolynomial(torch.exp(p[0])))
+            if p.degree == 1:
+                exps[k] += p[1]
+        exp_segment_function = SegmentFunction(
+            exp_coefs=exps,
+            polynomes=constants
+        )
+        return exp_segment_function
 
 
 class PiecewiseIntegral:
@@ -281,17 +304,29 @@ class PiecewiseIntegral:
         # get term structure defined over [a, b] and corresponding mask for coefficients
         is_in_segment = (self.term_structure >= a) & (self.term_structure < b)
         used_term_structure = self.term_structure[is_in_segment]
-        used_function_idxs = is_in_segment.nonzero()[0]
+        used_function_idxs = is_in_segment.nonzero().reshape(-1)
 
         if a not in used_term_structure:
             if a < self.term_structure[0]:
                 used_term_structure[0] = a
             else:
                 used_term_structure = [a] + used_term_structure
-                used_function_idxs = [used_function_idxs[0] - 1] + used_function_idxs
+                used_function_idxs = torch.nn.functional.pad(
+                    used_function_idxs,
+                    (1, 0),
+                    "constant",
+                    used_function_idxs[0] - 1
+                )
 
         if b not in used_term_structure:
-            used_term_structure[-1] = b
+            used_term_structure = torch.nn.functional.pad(
+                used_term_structure,
+                (0, 1),
+                "constant",
+                b
+            )
+            if used_function_idxs[-1] >= len(self.segment_functions):
+                used_function_idxs[-1] = len(self.segment_functions) - 1
 
         return used_term_structure, used_function_idxs
 
@@ -302,7 +337,35 @@ class PiecewiseIntegral:
         term_structure, function_idxs = self._truncate_term_structure(a, b)
         antiderivatives = [self.segment_functions[k].antiderivative() for k in function_idxs]
         segment_values = [F(term_structure[k + 1]) - F(term_structure[k]) for k, F in enumerate(antiderivatives)]
-        return torch.sum(torch.cat(segment_values))
+        return torch.sum(torch.stack(segment_values))
+
+    def get_forward_exponential(self, start: float = None):
+        # return function that looks like f: t -> exp(Integral_start^t self(s)ds)
+        if start is None:
+            start = self.term_structure[0]
+        new_segment_functions = []
+        for k, t in self.term_structure[:-1]:
+            constant_part = self.__call__(start, t)
+            function_part = self.segment_functions[k].get_exponential()
+            new_segment_functions.append(constant_part * function_part)
+        return PiecewiseIntegral(
+            term_structure=self.term_structure,
+            segment_functions=new_segment_functions
+        )
+
+    def get_backward_exponential(self, end: float = None):
+        # return function that looks like f: t -> exp(Integral_t^end self(s)ds)
+        if end is None:
+            end = self.term_structure[-1]
+        new_segment_functions = []
+        for k, t in self.term_structure[1:]:
+            constant_part = self.__call__(t, end)
+            function_part = self.segment_functions[k].get_exponential()
+            new_segment_functions.append(constant_part * function_part)
+        return PiecewiseIntegral(
+            term_structure=self.term_structure,
+            segment_functions=new_segment_functions
+        )
 
 
 class OldPiecewiseIntegral:
@@ -336,7 +399,7 @@ class OldPiecewiseIntegral:
 
     def _integrate_constant(self) -> Callable:
 
-        def integrate_function(a: float, b: float) -> float:
+        def integrate_function(a: float, b: float) -> torch.Tensor:
             used_term_structure, used_coefs, _ = self._truncate_term_structure(a, b)
             segment_integrals = used_coefs * torch.diff(used_term_structure)
             res = torch.sum(segment_integrals)
@@ -346,7 +409,7 @@ class OldPiecewiseIntegral:
 
     def _integrate_exponential(self) -> Callable:
 
-        def integrate_function(a: float, b: float) -> float:
+        def integrate_function(a: float, b: float) -> torch.Tensor:
             used_term_structure, used_coefs, used_constant_structure = self._truncate_term_structure(a, b)
             if used_constant_structure is None:
                 used_constant_structure = 1
@@ -430,7 +493,7 @@ def test_segment_function():
     return
 
 
-def test_constant():
+def test_old_constant():
     case_1 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
         "coef_structure": torch.ones(4, dtype=torch.float64)
@@ -438,6 +501,60 @@ def test_constant():
     case_2 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
         "coef_structure": torch.arange(4, dtype=torch.float64)
+    }
+
+    integral_1 = OldPiecewiseIntegral(**case_1)
+    assert integral_1(0, 1).item() == 1
+    assert integral_1(0, 2.5).item() == 2.5
+    assert integral_1(-1, 2).item() == 3
+    assert integral_1(0, 6).item() == 6
+
+    integral_2 = OldPiecewiseIntegral(**case_2)
+    assert integral_2(0, 1).item() == 0
+    assert integral_2(0, 2.5).item() == 2
+    assert integral_2(-1, 2).item() == 1
+    assert integral_2(3, 6).item() == 9
+
+    print('All constant test cases passed')
+    return
+
+
+def test_old_exponential():
+    case_1 = {
+        "term_structure": torch.arange(5, dtype=torch.float64),
+        "coef_structure": torch.ones(4, dtype=torch.float64),
+        "constant_structure": torch.ones(4, dtype=torch.float64),
+        "_type": 'exponential'
+    }
+    case_2 = {
+        "term_structure": torch.arange(5, dtype=torch.float64),
+        "coef_structure": torch.arange(4, dtype=torch.float64),
+        "constant_structure": torch.arange(4, dtype=torch.float64),
+        "_type": "exponential"
+    }
+    integral_1 = OldPiecewiseIntegral(**case_1)
+    assert integral_1(0, 1).item() == np.exp(1) - 1
+    assert integral_1(0, 4.5).item() == np.exp(4.5) - 1
+
+    integral_2 = OldPiecewiseIntegral(**case_2)
+    assert integral_2(0, 1).item() == 0
+    assert integral_2(0, 2).item() == np.exp(2) - np.exp(1)
+    assert integral_2(0, 3).item() == (np.exp(2) - np.exp(1)) + 2 * (np.exp(3 * 2) - np.exp(2 * 2)) / 2
+
+    print("All exponential test cases passed")
+    return
+
+
+def test_constant():
+    case_1 = {
+        "term_structure": torch.arange(5, dtype=torch.float64),
+        "coef_structure": torch.zeros(4, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 4
+    }
+    case_2 = {
+        "term_structure": torch.arange(5, dtype=torch.float64),
+        "coef_structure": torch.zeros(4, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64) * k for k in range(4)]
     }
 
     integral_1 = PiecewiseIntegral(**case_1)
@@ -460,14 +577,12 @@ def test_exponential():
     case_1 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
         "coef_structure": torch.ones(4, dtype=torch.float64),
-        "constant_structure": torch.ones(4, dtype=torch.float64),
-        "_type": 'exponential'
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 4
     }
     case_2 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
         "coef_structure": torch.arange(4, dtype=torch.float64),
-        "constant_structure": torch.arange(4, dtype=torch.float64),
-        "_type": "exponential"
+        "polynomial_structure": [torch.ones(1) * k for k in range(4)]
     }
     integral_1 = PiecewiseIntegral(**case_1)
     assert integral_1(0, 1).item() == np.exp(1) - 1
@@ -485,5 +600,7 @@ def test_exponential():
 if __name__ == "__main__":
     test_polynomes()
     test_segment_function()
+    test_old_constant()
+    test_old_exponential()
     test_constant()
     test_exponential()
