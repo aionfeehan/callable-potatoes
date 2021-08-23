@@ -3,7 +3,7 @@ import torch
 from typing import Tuple
 import numpy as np
 
-from integrals import PiecewiseIntegral
+from integrals import OldPiecewiseIntegral
 
 
 class LGM1F:
@@ -56,7 +56,7 @@ class LGM1F:
         elif t > T:
             return - self._capital_lambda(T, t)
         else:
-            lambda_integral = PiecewiseIntegral(
+            lambda_integral = OldPiecewiseIntegral(
                 term_structure=self.term_structure,
                 coef_structure=self.lambda_structure
             )
@@ -65,7 +65,7 @@ class LGM1F:
                 - torch.stack([lambda_integral(t, k) for k in used_term_structure[:-1]], dim=0)
             ) * torch.exp(-coef_structure * used_term_structure[:-1])
 
-            capital_lambda = PiecewiseIntegral(
+            capital_lambda = OldPiecewiseIntegral(
                 term_structure=used_term_structure,
                 coef_structure=coef_structure,
                 constant_structure=constant_structure,
@@ -74,7 +74,7 @@ class LGM1F:
         return capital_lambda(t, T)
 
     def _r(self, t: float) -> torch.Tensor:
-        constant_term_integral = PiecewiseIntegral(
+        constant_term_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=self.lambda_structure,
             _type='constant'
@@ -82,7 +82,7 @@ class LGM1F:
         constant_term = self.r_0 * torch.exp(- constant_term_integral(t))
 
         drift_term_constants_1 = self.lambda_structure * self.m_structure
-        drift_term_exp_integral = PiecewiseIntegral(
+        drift_term_exp_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=self.lambda_structure,
             _type="constant"
@@ -95,7 +95,7 @@ class LGM1F:
         )
         drift_term_constants_3 = torch.exp(self.lambda_structure * self.term_structure[:-1])
         drift_term_constants = drift_term_constants_1 * drift_term_constants_2 * drift_term_constants_3
-        drift_term_integral = PiecewiseIntegral(
+        drift_term_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=-self.lambda_structure,
             constant_structure=drift_term_constants,
@@ -103,7 +103,7 @@ class LGM1F:
         )
         drift_term = drift_term_integral(0, t)
 
-        vol_term_exp_integral = PiecewiseIntegral(
+        vol_term_exp_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=self.lambda_structure,
             _type="constant"
@@ -115,7 +115,7 @@ class LGM1F:
             )
         )
         vol_term_constants = (self.sigma_structure * vol_term_constants_2) ** 2
-        vol_term_integral = PiecewiseIntegral(
+        vol_term_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=- 2 * self.lambda_structure,
             constant_structure=vol_term_constants,
@@ -131,7 +131,7 @@ class LGM1F:
         r_t = self._r(t)
         constant_term = self._capital_lambda(t, T) * r_t
         lambda_x_m = self.lambda_structure * self.m_structure
-        drift_term_integral_1 = PiecewiseIntegral(
+        drift_term_integral_1 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=lambda_x_m/self.lambda_structure,
             _type="constant"
@@ -141,7 +141,7 @@ class LGM1F:
             dim=0
         )
         exp_lambda_t_i = torch.exp(- self.lambda_structure * self.term_structure[1:])
-        drift_term_integral_2 = PiecewiseIntegral(
+        drift_term_integral_2 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=self.lambda_structure,
             constant_structure=(1 / self.lambda_structure - capital_lambdas) * exp_lambda_t_i * lambda_x_m,
@@ -150,7 +150,7 @@ class LGM1F:
 
         drift_term = drift_term_integral_1(t, T) - drift_term_integral_2(t, T)
 
-        vol_term_integral_1 = PiecewiseIntegral(
+        vol_term_integral_1 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=(self.sigma_structure / self.lambda_structure) ** 2,
             _type="constant"
@@ -159,7 +159,7 @@ class LGM1F:
         vol_2_constants = 2 * (capital_lambdas / self.lambda_structure - 1 / self.lambda_structure) * \
                           exp_lambda_t_i * (self.sigma_structure ** 2)
 
-        vol_term_integral_2 = PiecewiseIntegral(
+        vol_term_integral_2 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=self.lambda_structure,
             constant_structure=vol_2_constants,
@@ -172,7 +172,7 @@ class LGM1F:
                           (exp_lambda_t_i ** 2) * \
                           self.sigma_structure ** 2
 
-        vol_term_integral_3 = PiecewiseIntegral(
+        vol_term_integral_3 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
             coef_structure=2 * self.lambda_structure,
             constant_structure=vol_3_constants,
@@ -195,7 +195,7 @@ class LGM1F:
     def libor(self, t, T, T_tau, coverage=None):
         if coverage == None:
             coverage = (T_tau - T)
-        libors = (self.discount_factor(t, T_tau) / self.discount_factor(t, T) - 1) / coverage
+        libors = (1 / self.discount_factor(T, T_tau) - 1) / coverage
         return libors
 
     @staticmethod
