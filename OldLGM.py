@@ -3,7 +3,7 @@ import torch
 from typing import Tuple
 import numpy as np
 
-from piecewise_functions import PiecewiseFunction, SegmentFunction
+from piecewise_functions import OldPiecewiseIntegral
 
 
 class LGM1F:
@@ -50,53 +50,78 @@ class LGM1F:
 
         return used_term_structure, used_coefs
 
-    def _capital_lambda(self, end: float) -> PiecewiseFunction:
-        lambda_function = PiecewiseFunction(
-            term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[- torch.ones(1) * l] for l in self.lambda_structure]
-        )
-        exp_lambda_forward = lambda_function.get_exponential_forward_integral(start=0)
-        exp_lambda_forward_p = exp_lambda_forward.antiderivative()
-        exp_lambda_backward = (-1 * lambda_function).get_exponential_forward_integral(start=0)
-        capital_lambda = exp_lambda_backward * (exp_lambda_forward_p(end) - exp_lambda_forward_p)
+    def _capital_lambda(self, t: float, T: float) -> torch.Tensor:
+        if t == T:
+            return torch.tensor(0, dtype=torch.float64)
+        elif t > T:
+            return - self._capital_lambda(T, t)
+        else:
+            lambda_integral = OldPiecewiseIntegral(
+                term_structure=self.term_structure,
+                coef_structure=self.lambda_structure
+            )
+            used_term_structure, coef_structure = self._truncate_term_structure(t, T, - self.lambda_structure)
+            constant_structure = torch.exp(
+                - torch.stack([lambda_integral(t, k) for k in used_term_structure[:-1]], dim=0)
+            ) * torch.exp(-coef_structure * used_term_structure[:-1])
 
-        return capital_lambda
+            capital_lambda = OldPiecewiseIntegral(
+                term_structure=used_term_structure,
+                coef_structure=coef_structure,
+                constant_structure=constant_structure,
+                _type='exponential'
+            )
+        return capital_lambda(t, T)
 
     def _r(self, t: float) -> torch.Tensor:
-        constant_term_integral = PiecewiseFunction(
+        constant_term_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[torch.ones(1) * l] for l in self.lambda_structure]
+            coef_structure=self.lambda_structure,
+            _type='constant'
         )
         constant_term = self.r_0 * torch.exp(- constant_term_integral(t))
 
-        drift_internal_integral = PiecewiseFunction(
+        drift_term_constants_1 = self.lambda_structure * self.m_structure
+        drift_term_exp_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[- torch.ones(1) * l for l in self.lambda_structure]
+            coef_structure=self.lambda_structure,
+            _type="constant"
         )
-        drift_exp_integral = drift_internal_integral.get_exponential_backward_integral(end=t)
-        drift_integral_constants = PiecewiseFunction(
+        drift_term_constants_2 = torch.exp(
+            - torch.stack(
+                [drift_term_exp_integral(s, t) for s in self.term_structure[1:]],
+                dim=0
+            )
+        )
+        drift_term_constants_3 = torch.exp(self.lambda_structure * self.term_structure[:-1])
+        drift_term_constants = drift_term_constants_1 * drift_term_constants_2 * drift_term_constants_3
+        drift_term_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[torch.ones(1) * l * m] for l, m in zip(self.lambda_structure, self.m_structure)]
+            coef_structure=-self.lambda_structure,
+            constant_structure=drift_term_constants,
+            _type="exponential"
         )
-        drift_integral = drift_exp_integral * drift_integral_constants
-        drift_term = drift_integral(t)
+        drift_term = drift_term_integral(0, t)
 
-        vol_exp_integral = PiecewiseFunction(
+        vol_term_exp_integral = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[- torch.ones(1) * l] for l in self.lambda_structure]
-        ).get_exponential_backward_integral(end=t)
-        vol_constants = PiecewiseFunction(
-            term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
+            coef_structure=self.lambda_structure,
+            _type="constant"
         )
-        vol_integral = vol_exp_integral * vol_constants
-        vol_term = (vol_integral ** 2)(t)
+        vol_term_constants_2 = torch.exp(
+            - torch.stack(
+                [vol_term_exp_integral(s, t) for s in self.term_structure[1:]],
+                dim=0
+            )
+        )
+        vol_term_constants = (self.sigma_structure * vol_term_constants_2) ** 2
+        vol_term_integral = OldPiecewiseIntegral(
+            term_structure=self.term_structure,
+            coef_structure=- 2 * self.lambda_structure,
+            constant_structure=vol_term_constants,
+            _type="exponential"
+        )
+        vol_term = vol_term_integral(0, t)
         r_std = torch.sqrt(vol_term)
 
         r = constant_term + drift_term + r_std * self.dW
@@ -104,27 +129,57 @@ class LGM1F:
 
     def _r_integral_params(self, t, T):
         r_t = self._r(t)
-        capital_lambda = self._capital_lambda(T)
-        constant_term = capital_lambda(t) * r_t
-
-        drift_term_capital_lambda = self._capital_lambda(T)
-        drift_term_integral_segment_functions = []
-        for k, (l, m) in enumerate(zip(self.lambda_structure, self.m_structure)):
-            capital_lambda = drift_term_capital_lambda.integral(self.term_structure[k], T)
-            drift_term_integral_segment_functions.append(capital_lambda.segment_functions[0] * l * m)
-        drift_term = PiecewiseFunction(
+        constant_term = self._capital_lambda(t, T) * r_t
+        lambda_x_m = self.lambda_structure * self.m_structure
+        drift_term_integral_1 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            segment_functions=drift_term_integral_segment_functions
-        ).integral(t, T)
-
-        vol_term_capital_lambda = self._capital_lambda(T)
-        vol_term_function = vol_term_capital_lambda * PiecewiseFunction(
+            coef_structure=lambda_x_m/self.lambda_structure,
+            _type="constant"
+        )
+        capital_lambdas = torch.stack(
+            [self._capital_lambda(t_i, T) for t_i in self.term_structure[1:]],
+            dim=0
+        )
+        exp_lambda_t_i = torch.exp(- self.lambda_structure * self.term_structure[1:])
+        drift_term_integral_2 = OldPiecewiseIntegral(
             term_structure=self.term_structure,
-            exp_coef_structure=None,
-            polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
+            coef_structure=self.lambda_structure,
+            constant_structure=(1 / self.lambda_structure - capital_lambdas) * exp_lambda_t_i * lambda_x_m,
+            _type="exponential"
         )
 
-        vol_term = (vol_term_function ** 2).integral(0, T)
+        drift_term = drift_term_integral_1(t, T) - drift_term_integral_2(t, T)
+
+        vol_term_integral_1 = OldPiecewiseIntegral(
+            term_structure=self.term_structure,
+            coef_structure=(self.sigma_structure / self.lambda_structure) ** 2,
+            _type="constant"
+        )
+
+        vol_2_constants = 2 * (capital_lambdas / self.lambda_structure - 1 / self.lambda_structure) * \
+                          exp_lambda_t_i * (self.sigma_structure ** 2)
+
+        vol_term_integral_2 = OldPiecewiseIntegral(
+            term_structure=self.term_structure,
+            coef_structure=self.lambda_structure,
+            constant_structure=vol_2_constants,
+            _type="exponential"
+        )
+
+        vol_3_constants = (1 / self.lambda_structure ** 2 + \
+                          capital_lambdas ** 2 - \
+                          2 * capital_lambdas / self.lambda_structure) * \
+                          (exp_lambda_t_i ** 2) * \
+                          self.sigma_structure ** 2
+
+        vol_term_integral_3 = OldPiecewiseIntegral(
+            term_structure=self.term_structure,
+            coef_structure=2 * self.lambda_structure,
+            constant_structure=vol_3_constants,
+            _type="exponential"
+        )
+
+        vol_term = vol_term_integral_1(t, T) + vol_term_integral_2(t, T) + vol_term_integral_3(t, T)
         r_integral_std = torch.sqrt(vol_term)
 
         return constant_term, drift_term, r_integral_std
