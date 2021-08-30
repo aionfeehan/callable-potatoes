@@ -67,7 +67,7 @@ class LGM1F:
 
         return capital_lambda
 
-    def _r(self, t: float) -> torch.Tensor:
+    def _r(self, t: float, forward_measure: float = None) -> torch.Tensor:
         constant_term_integral = PiecewiseFunction(
             term_structure=self.term_structure,
             exp_coef_structure=None,
@@ -94,20 +94,31 @@ class LGM1F:
             exp_coef_structure=None,
             polynomial_structure=[[- torch.ones(1) * l] for l in self.lambda_structure]
         ).get_exponential_backward_integral(end=t)
-        vol_constants = PiecewiseFunction(
+        vol_term_function = PiecewiseFunction(
             term_structure=self.term_structure,
             exp_coef_structure=None,
             polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
         )
-        vol_function = vol_exp_integral * vol_constants
+        vol_function = vol_exp_integral * vol_term_function
         vol_term = (vol_function ** 2).integral(0, t)
         r_std = torch.sqrt(vol_term)
+
+        if forward_measure is not None:
+            # we do a change of measure to the t-forward measure (where t is the "forward_measure" variable)
+            sigma_d = -1 * self._capital_lambda(forward_measure) * vol_term_function
+            measure_change_drift_function = vol_function * sigma_d
+            drift_term += measure_change_drift_function.integral(0, t)
 
         r = constant_term + drift_term + r_std * self.dW
         return r
 
-    def _r_integral_params(self, t, T):
-        r_t = self._r(t)
+    def _r_integral_params(
+            self,
+            t: float,
+            T: float,
+            forward_measure: float = None
+    ) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
+        r_t = self._r(t, forward_measure=forward_measure)
         capital_lambda = self._capital_lambda(T)
         constant_term = capital_lambda(t) * r_t
 
@@ -121,29 +132,35 @@ class LGM1F:
         drift_term = (drift_term_capital_lambda * lambda_x_m).integral(t, T)
 
         vol_term_capital_lambda = self._capital_lambda(T)
-        vol_term_function = vol_term_capital_lambda * PiecewiseFunction(
+        vol_term_function = PiecewiseFunction(
             term_structure=self.term_structure,
             exp_coef_structure=None,
             polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
         )
 
-        vol_term = (vol_term_function ** 2).integral(t, T)
+        vol_function = vol_term_capital_lambda * vol_term_function
+        vol_term = (vol_function ** 2).integral(t, T)
         r_integral_std = torch.sqrt(vol_term)
+
+        if forward_measure is not None:
+            sigma_d = -1 * self._capital_lambda(forward_measure) * vol_term_function
+            measure_change_drift_function = sigma_d * vol_function
+            drift_term += measure_change_drift_function.integral(t, T)
 
         return constant_term, drift_term, r_integral_std
 
-    def r_integral(self, t, T):
-        constant_term, drift_term, r_integral_std = self._r_integral_params(t, T)
+    def r_integral(self, t: float, T: float, forward_measure: float = None):
+        constant_term, drift_term, r_integral_std = self._r_integral_params(t, T, forward_measure=forward_measure)
         return constant_term + drift_term + r_integral_std * self.dW
 
-    def discount_factor(self, t, T):
-        constant_term, drift_term, r_integral_std = self._r_integral_params(t, T)
+    def discount_factor(self, t: float, T: float, forward_measure: float = None):
+        constant_term, drift_term, r_integral_std = self._r_integral_params(t, T, forward_measure=forward_measure)
         return torch.exp(- constant_term - drift_term + 0.5 * r_integral_std ** 2)
 
-    def libor(self, t, T, T_tau, coverage=None):
+    def libor(self, T, T_tau, coverage=None):
         if coverage is None:
             coverage = (T_tau - T)
-        libors = (1 / self.discount_factor(T, T_tau) - 1) / coverage
+        libors = (1 - self.discount_factor(T, T_tau, forward_measure=T_tau)) / coverage
         return libors
 
     @staticmethod
@@ -155,12 +172,12 @@ class LGM1F:
         return torch.maximum(K - L, torch.zeros(L.shape))
 
     def price_caplet(self, T: float, T_tau: float, K: float) -> torch.Tensor:
-        L = self.libor(0, T, T_tau)
+        L = self.libor(T, T_tau)
         pv = torch.mean(self.call_payoff(L, K))
         return pv
 
     def price_floorlet(self, T: float, T_tau: float, K: float) -> torch.Tensor:
-        L = self.libor(0, T, T_tau)
+        L = self.libor(T, T_tau)
         pv = torch.mean(self.put_payoff(L, K))
         return pv
 
@@ -199,7 +216,7 @@ def test_lgm(test_case, test_name="test"):
     print(f"DF 2-4: {df_24}")
     print('\n\n')
 
-    res = lgm.get_caplet_greeks(1, 2, 0.01)
+    res = lgm.get_caplet_greeks(1, 1.25, 0.01)
     print(res)
     print('\n\n')
 
@@ -214,24 +231,24 @@ def run_tests():
         'lambda_structure': np.ones(4) * 1,
         'm_structure': np.ones(4) * 0.01,
         'sigma_structure': np.ones(4) * 1e-9,
-        'n_paths': 10000
+        'n_paths': 1000000
     }
 
-    test_lgm(case_1, "Flat curve, no vol")
+    # test_lgm(case_1, "Flat curve, no vol")
     # flat curve, add vol
     case_2 = deepcopy(case_1)
-    case_2['sigma_structure'] = np.ones(4) * 1e-3
+    case_2['sigma_structure'] = np.ones(4) * 1e-2
     test_lgm(case_2, f"Flat curve, vol = {case_2['sigma_structure'][0]}")
 
-    # step function m, no vol
-    case_3 = deepcopy(case_1)
-    case_3['m_structure'] = np.arange(4)
-    test_lgm(case_3, "Step function m, no vol")
-
-    # step function m, with vol
-    case_4 = deepcopy(case_3)
-    case_4['sigma_structure'] = np.ones(4) * 1e-3
-    test_lgm(case_4, f"Step function m, vol = {case_4['sigma_structure'][0]}")
+    # # step function m, no vol
+    # case_3 = deepcopy(case_1)
+    # case_3['m_structure'] = np.arange(4)
+    # test_lgm(case_3, "Step function m, no vol")
+    #
+    # # step function m, with vol
+    # case_4 = deepcopy(case_3)
+    # case_4['sigma_structure'] = np.ones(4) * 1e-3
+    # test_lgm(case_4, f"Step function m, vol = {case_4['sigma_structure'][0]}")
 
 
 if __name__ == '__main__':
