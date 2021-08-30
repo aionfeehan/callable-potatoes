@@ -5,6 +5,8 @@ import numpy as np
 
 from piecewise_functions import PiecewiseFunction, SegmentFunction
 
+torch.manual_seed(0)
+
 
 class LGM1F:
     def __init__(
@@ -59,7 +61,9 @@ class LGM1F:
         exp_lambda_forward = lambda_function.get_exponential_forward_integral(start=0)
         exp_lambda_forward_p = exp_lambda_forward.antiderivative()
         exp_lambda_backward = (-1 * lambda_function).get_exponential_forward_integral(start=0)
-        capital_lambda = exp_lambda_backward * (exp_lambda_forward_p(end) - exp_lambda_forward_p)
+        epsilon = 1e-9  # hack used to compute the integral, as exp_lambda_forward_p.__call__(x) chooses the segment
+            # function by idx such that idx is the last index where term_structure[idx] >= x
+        capital_lambda = exp_lambda_backward * (exp_lambda_forward_p(end - epsilon) - exp_lambda_forward_p)
 
         return capital_lambda
 
@@ -69,7 +73,7 @@ class LGM1F:
             exp_coef_structure=None,
             polynomial_structure=[[torch.ones(1) * l] for l in self.lambda_structure]
         )
-        constant_term = self.r_0 * torch.exp(- constant_term_integral(t))
+        constant_term = self.r_0 * torch.exp(- constant_term_integral.integral(0, t))
 
         drift_internal_integral = PiecewiseFunction(
             term_structure=self.term_structure,
@@ -82,8 +86,8 @@ class LGM1F:
             exp_coef_structure=None,
             polynomial_structure=[[torch.ones(1) * l * m] for l, m in zip(self.lambda_structure, self.m_structure)]
         )
-        drift_integral = drift_exp_integral * drift_integral_constants
-        drift_term = drift_integral(t)
+        drift_function = drift_exp_integral * drift_integral_constants
+        drift_term = drift_function.integral(0, t)
 
         vol_exp_integral = PiecewiseFunction(
             term_structure=self.term_structure,
@@ -95,8 +99,8 @@ class LGM1F:
             exp_coef_structure=None,
             polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
         )
-        vol_integral = vol_exp_integral * vol_constants
-        vol_term = (vol_integral ** 2)(t)
+        vol_function = vol_exp_integral * vol_constants
+        vol_term = (vol_function ** 2).integral(0, t)
         r_std = torch.sqrt(vol_term)
 
         r = constant_term + drift_term + r_std * self.dW
@@ -108,14 +112,13 @@ class LGM1F:
         constant_term = capital_lambda(t) * r_t
 
         drift_term_capital_lambda = self._capital_lambda(T)
-        drift_term_integral_segment_functions = []
-        for k, (l, m) in enumerate(zip(self.lambda_structure, self.m_structure)):
-            capital_lambda = drift_term_capital_lambda.integral(self.term_structure[k], T)
-            drift_term_integral_segment_functions.append(capital_lambda.segment_functions[0] * l * m)
-        drift_term = PiecewiseFunction(
+        lambda_x_m = PiecewiseFunction(
+
             term_structure=self.term_structure,
-            segment_functions=drift_term_integral_segment_functions
-        ).integral(t, T)
+            exp_coef_structure=None,
+            polynomial_structure=[[torch.ones(1) * l * m] for l, m in zip(self.lambda_structure, self.m_structure)]
+        )
+        drift_term = (drift_term_capital_lambda * lambda_x_m).integral(t, T)
 
         vol_term_capital_lambda = self._capital_lambda(T)
         vol_term_function = vol_term_capital_lambda * PiecewiseFunction(
@@ -124,7 +127,7 @@ class LGM1F:
             polynomial_structure=[[torch.ones(1) * s] for s in self.sigma_structure]
         )
 
-        vol_term = (vol_term_function ** 2).integral(0, T)
+        vol_term = (vol_term_function ** 2).integral(t, T)
         r_integral_std = torch.sqrt(vol_term)
 
         return constant_term, drift_term, r_integral_std

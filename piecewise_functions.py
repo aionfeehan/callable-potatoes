@@ -42,7 +42,7 @@ class TorchPolynomial:
         new_coefs = []
         new_deg = self.degree + polynome.degree
         for k in range(new_deg + 1):
-            valid_coefs = torch.stack(
+            valid_coefs = torch.cat(
                 [torch.stack([self[i] * polynome[j] for j in range(min(i, polynome.degree) + 1)])
                 for i in range(min(k, self.degree) + 1)]
             )
@@ -124,8 +124,8 @@ class SegmentFunction:
     def __add__(self, other):
         other_function = self.coerce_to_segment_function(other)
         return SegmentFunction(
-            torch.cat([self.exp_coefs, other.exp_coefs]),
-            self.polynomes + other.polynomes
+            torch.cat([self.exp_coefs, other_function.exp_coefs]),
+            self.polynomes + other_function.polynomes
         )
 
     def __pow__(self, power):
@@ -140,8 +140,8 @@ class SegmentFunction:
     def __sub__(self, other):
         other_function = self.coerce_to_segment_function(other)
         return SegmentFunction(
-            torch.cat([self.exp_coefs, other.exp_coefs]),
-            self.polynomes + [- k for k in other.polynomes]
+            torch.cat([self.exp_coefs, other_function.exp_coefs]),
+            self.polynomes + [-1 * k for k in other_function.polynomes]
         )
 
     def __rsub__(self, other):
@@ -198,7 +198,7 @@ class SegmentFunction:
             return polynome.antiderivative(0)
         else:
             while polynome.degree > 0:
-                return polynome * 1 / exp_coef + \
+                return polynome * 1 / exp_coef - \
                        self._single_antiderivative(polynome.derivative() * 1 / exp_coef, exp_coef)
             return polynome * 1 / exp_coef
 
@@ -390,12 +390,12 @@ class PiecewiseFunction:
 
     def __call__(self, x: float) -> torch.Tensor:
         is_relevant_segment = (self.term_structure <= x).nonzero()
-        if not any(is_relevant_segment):
+        if not len(is_relevant_segment):
             function_idx = 0
-        elif all(is_relevant_segment):
+        elif len(is_relevant_segment) == len(self.term_structure):
             function_idx = -1
         else:
-            function_idx = is_relevant_segment[0]
+            function_idx = is_relevant_segment[-1]
         return self.segment_functions[function_idx](x)
 
     def get_exponential_forward_integral(self, start: float = None):
@@ -404,9 +404,11 @@ class PiecewiseFunction:
             start = self.term_structure[0]
         new_segment_functions = []
         for k, t in enumerate(self.term_structure[:-1]):
-            constant_part = self.integral(start, t)
-            function_part = self.segment_functions[k].get_exponential()
-            new_segment_functions.append(constant_part * function_part)
+            integral_remainder = torch.exp(self.integral(start, t))
+            primitive = self.segment_functions[k].antiderivative()
+            primitive_constant = primitive(t)
+            function_part = (primitive - primitive_constant).get_exponential()
+            new_segment_functions.append(integral_remainder * function_part)
         return PiecewiseFunction(
             term_structure=self.term_structure,
             segment_functions=new_segment_functions
@@ -416,15 +418,7 @@ class PiecewiseFunction:
         # return function that looks like f: t -> exp(Integral_t^end self(s)ds)
         if end is None:
             end = self.term_structure[-1]
-        new_segment_functions = []
-        for k, t in enumerate(self.term_structure[1:]):
-            constant_part = self.integral(t, end)
-            function_part = self.segment_functions[k].get_exponential()
-            new_segment_functions.append(constant_part * function_part)
-        return PiecewiseFunction(
-            term_structure=self.term_structure,
-            segment_functions=new_segment_functions
-        )
+        return (- 1 * self).get_exponential_forward_integral(start=end)
 
     def _coerce_to_piecewise_function(self, other):
         if isinstance(other, PiecewiseFunction):
