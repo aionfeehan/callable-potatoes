@@ -228,7 +228,7 @@ class LGM1F:
             coverage = T_tau - T
         libor_rate = self.libor(T, T_tau)
         df = torch.mean(self.discount_factor(0, T))
-        df_forward = self.disocunt_factor(T, T_tau, forward_measure=T)
+        df_forward = self.discount_factor(T, T_tau, forward_measure=T)
         payoff = torch.maximum(K - libor_rate, torch.zeros(libor_rate.shape))
         pv = df * coverage * torch.mean(df_forward * payoff)
         return pv
