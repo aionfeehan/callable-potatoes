@@ -44,7 +44,7 @@ class TorchPolynomial:
         for k in range(new_deg + 1):
             valid_coefs = torch.cat(
                 [torch.stack([self[i] * polynome[j] for j in range(min(i, polynome.degree) + 1)])
-                for i in range(min(k, self.degree) + 1)]
+                 for i in range(min(k, self.degree) + 1)]
             )
             new_coefs.append(torch.sum(valid_coefs))
         return TorchPolynomial(torch.stack(new_coefs, dim=0))
@@ -129,10 +129,16 @@ class SegmentFunction:
         )
 
     def __pow__(self, power):
-        return SegmentFunction(
-            self.exp_coefs * power,
-            [p ** power for p in self.polynomes]
-        )
+        assert isinstance(power, int)
+        if power == 1:
+            return self
+        elif power == 0:
+            return SegmentFunction(
+                exp_coefs=torch.zeros(1),
+                polynomes=[TorchPolynomial(torch.ones(1))]
+            )
+        else:
+            return self.__pow__(power // 2) * self.__pow__(power - power // 2)
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -207,7 +213,7 @@ class SegmentFunction:
             return
         else:
             values, counts = np.unique(self.exp_coefs.detach(), return_counts=True)
-            to_keep = []
+            to_drop = []
             for k, v in enumerate(values):
                 if counts[k] > 1:
                     is_value = (np.array(self.exp_coefs.detach()) == v).nonzero()[0]
@@ -215,7 +221,8 @@ class SegmentFunction:
                     for i in range(1, counts[k]):
                         idx_to_drop = is_value[i]
                         self.polynomes[idx_to_keep] += self.polynomes[idx_to_drop]
-                    to_keep.append(idx_to_keep)
+                        to_drop.append(idx_to_drop)
+            to_keep = [k for k in range(len(self.exp_coefs)) if k not in to_drop]
             self.exp_coefs = self.exp_coefs[to_keep]
             self.polynomes = [self.polynomes[k] for k in to_keep]
         return
@@ -247,7 +254,7 @@ class SegmentFunction:
         assert self.degree <= 1
         assert all(self.exp_coefs == 0)
         constants = []
-        exps = torch.zeros(len(self.polynomes))
+        exps = torch.zeros(len(self.polynomes), dtype=torch.float64)
         for k, p in enumerate(self.polynomes):
             constants.append(TorchPolynomial(torch.exp(p[0])))
             if p.degree == 1:
@@ -267,13 +274,13 @@ class PiecewiseFunction:
             polynomial_structure: Union[List[List[torch.Tensor]], List[List[TorchPolynomial]]] = None,
             segment_functions: List[SegmentFunction] = None
     ):
-        assert (polynomial_structure is None) or (len(polynomial_structure) + 1 == len(term_structure))
-        assert (exp_coef_structure is None) or (len(exp_coef_structure)) + 1 == len(term_structure)
+        assert (polynomial_structure is None) or (len(polynomial_structure) == len(term_structure))
+        assert (exp_coef_structure is None) or (len(exp_coef_structure)) == len(term_structure)
 
         self.term_structure = term_structure.double()
         if segment_functions is None:
             if exp_coef_structure is None:
-                exp_coef_structure = [torch.zeros(len(p_list)) for p_list in polynomial_structure]
+                exp_coef_structure = [torch.zeros(len(p_list), dtype=torch.float64) for p_list in polynomial_structure]
             self.exp_coef_structure = exp_coef_structure
             self.polynomial_structure = [[TorchPolynomial(p) for p in seg_polys] for seg_polys in polynomial_structure]
             if polynomial_structure is None:
@@ -341,7 +348,14 @@ class PiecewiseFunction:
 
     def _truncate_term_structure(self, a: float, b: float) -> Tuple[torch.Tensor, List[int]]:
         # get term structure defined over [a, b] and corresponding mask for coefficients
+        is_before_a = (self.term_structure < a)
+        if not any(is_before_a):
+            greatest_before_a = 0
+        else:
+            greatest_before_a = is_before_a.nonzero().reshape(-1)[-1]
+
         is_in_segment = (self.term_structure >= a) & (self.term_structure < b)
+
         used_term_structure = self.term_structure[is_in_segment]
         used_function_idxs = is_in_segment.nonzero().reshape(-1)
 
@@ -359,7 +373,7 @@ class PiecewiseFunction:
                     used_function_idxs,
                     (1, 0),
                     "constant",
-                    used_function_idxs[0] - 1
+                    greatest_before_a
                 )
 
         if b not in used_term_structure:
@@ -370,7 +384,7 @@ class PiecewiseFunction:
                 b
             )
             if used_function_idxs[-1] >= len(self.segment_functions):
-                used_function_idxs[-1] = len(self.segment_functions) - 1
+                used_function_idxs[-1] = len(self.segment_functions)
 
         return used_term_structure, used_function_idxs
 
@@ -381,7 +395,7 @@ class PiecewiseFunction:
         if a > b:
             return - self.integral(b, a)
         elif a == b:
-            return torch.zeros(1)
+            return torch.zeros(1, dtype=torch.float64).squeeze()
         else:
             term_structure, function_idxs = self._truncate_term_structure(a, b)
             antiderivatives = [self.segment_functions[k].antiderivative() for k in function_idxs]
@@ -427,14 +441,14 @@ class PiecewiseFunction:
             return PiecewiseFunction(
                 term_structure=self.term_structure,
                 exp_coef_structure=None,
-                polynomial_structure=[[torch.tensor(other)] * (len(self.term_structure) - 1)]
+                polynomial_structure=[[torch.tensor(other)] * (len(self.term_structure))]
             )
         elif isinstance(other, torch.Tensor):
             assert len(other.reshape(-1)) == 1, "Only 1-element tensors can be converted to constant function"
             return PiecewiseFunction(
                 term_structure=self.term_structure,
                 exp_coef_structure=None,
-                polynomial_structure=[[other.clone()]] * (len(self.term_structure) - 1)
+                polynomial_structure=[[other.clone()]] * (len(self.term_structure))
             )
         else:
             raise TypeError(f"Unsupported type for PiecewiseFunction {type(other)}")
@@ -620,13 +634,13 @@ def test_old_exponential():
 def test_constant():
     case_1 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
-        "exp_coef_structure": torch.zeros(4, dtype=torch.float64),
-        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 4
+        "exp_coef_structure": torch.zeros(5, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 5
     }
     case_2 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
-        "exp_coef_structure": torch.zeros(4, dtype=torch.float64),
-        "polynomial_structure": [torch.ones(1, dtype=torch.float64) * k for k in range(4)]
+        "exp_coef_structure": torch.zeros(5, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64) * k for k in range(5)]
     }
 
     function_1 = PiecewiseFunction(**case_1)
@@ -641,7 +655,7 @@ def test_constant():
     assert function_2.integral(0, 1).item() == 0
     assert function_2.integral(0, 2.5).item() == 2
     assert function_2.integral(-1, 2).item() == 1
-    assert function_2.integral(3, 6).item() == 9
+    assert function_2.integral(3, 6).item() == 11
 
     print('All constant test cases passed')
     return
@@ -650,13 +664,13 @@ def test_constant():
 def test_exponential():
     case_1 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
-        "exp_coef_structure": torch.ones(4, dtype=torch.float64),
-        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 4
+        "exp_coef_structure": torch.ones(5, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1, dtype=torch.float64)] * 5
     }
     case_2 = {
         "term_structure": torch.arange(5, dtype=torch.float64),
-        "exp_coef_structure": torch.arange(4, dtype=torch.float64),
-        "polynomial_structure": [torch.ones(1) * k for k in range(4)]
+        "exp_coef_structure": torch.arange(5, dtype=torch.float64),
+        "polynomial_structure": [torch.ones(1) * k for k in range(5)]
     }
     function_1 = PiecewiseFunction(**case_1)
     assert function_1.integral(0, 1).item() == np.exp(1) - 1
