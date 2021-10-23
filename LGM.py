@@ -1,3 +1,4 @@
+from copy import deepcopy
 import torch
 from typing import Tuple
 import numpy as np
@@ -169,7 +170,7 @@ class LGM1F:
     def _build_m_structure(self, discount_factor_function: callable, m_structure: np.ndarray) -> torch.Tensor:
         assert (discount_factor_function is not None) or (m_structure is not None)
         if m_structure is not None:
-            assert len(m_structure) + 1 == len(self.term_structure)
+            assert len(m_structure) == len(self.term_structure)
             return torch.from_numpy(m_structure.astype(np.float64))
         else:
             term_structure = self.term_structure.clone()
@@ -213,7 +214,7 @@ class LGM1F:
         libors = (1 / self.discount_factor(T, T_tau, forward_measure=T) - 1) / coverage
         return libors
 
-    def price_caplet(self, T:float, T_tau: float, K: float, coverage: float = None) -> torch.Tensor:
+    def price_caplet(self, T: float, T_tau: float, K: float, coverage: float = None) -> torch.Tensor:
         if coverage is None:
             coverage = T_tau - T
         df = torch.mean(self.discount_factor(0, T))
@@ -238,18 +239,22 @@ class LGM1F:
         self.sigma_structure.grad = None
         self.lambda_structure.grad = None
         self.m_structure.grad = None
+        self.r_0.retain_grad()
+        self.sigma_structure.retain_grad()
+        self.lambda_structure.retain_grad()
+        self.m_structure.retain_grad()
         return
 
     def get_caplet_greeks(self, T: float, T_tau: float, K: float) -> dict:
         self.reset_grad()
         pv = self.price_caplet(T, T_tau, K)
-        pv.backward()
+        pv.backward(retain_graph=True)
         res = {
             'pv': pv.item(),
-            'dr_0': self.r_0.grad,
-            'dsigma': self.sigma_structure.grad,
-            'dlambda': self.lambda_structure.grad,
-            'dm': self.m_structure.grad
+            'dr_0': list(self.r_0.grad.clone().detach().numpy().reshape(-1)),
+            'dsigma': list(self.sigma_structure.grad.clone().detach().numpy().reshape(-1)),
+            'dlambda': list(self.lambda_structure.grad.clone().detach().numpy().reshape(-1)),
+            'dm': list(self.m_structure.grad.clone().detach().detach().numpy().reshape(-1))
         }
         return res
 
@@ -310,12 +315,20 @@ def test_m_calibration():
 
 
 def run_tests():
+    case_1 = {
+        'r_0': np.array([0.01]),
+        'term_structure': np.arange(5),
+        'lambda_structure': np.ones(5) * 1e-2,
+        'sigma_structure': np.ones(5) * 0,
+        'm_structure': np.ones(5) * 1e-2,
+        'n_paths': 10000
+    }
 
-    # test_lgm(case_1, "Flat curve, no vol")
+    test_lgm(case_1, "Flat curve, no vol")
     # flat curve, add vol
-    # case_2 = deepcopy(case_1)
-    # case_2['sigma_structure'] = np.ones(4) * 1e-2
-    # test_lgm(case_2, f"Flat curve, vol = {case_2['sigma_structure'][0]}")
+    case_2 = deepcopy(case_1)
+    case_2['sigma_structure'] = np.ones(5) * 1e-2
+    test_lgm(case_2, f"Flat curve, vol = {case_2['sigma_structure'][0]}")
 
     # # step function m, no vol
     # case_3 = deepcopy(case_1)
