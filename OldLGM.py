@@ -31,20 +31,29 @@ class LGM1F:
     def _truncate_term_structure(self, a: float, b: float, structure: torch.Tensor = None) \
             -> Tuple[torch.Tensor, torch.Tensor]:
         # get term structure defined over [a, b] and corresponding mask for coefficients
-        is_in_segment = (self.term_structure >= a) & (self.term_structure < b)
-        used_term_structure = self.term_structure[is_in_segment]
+        is_before_idx = (self.term_structure <= a).nonzero()
+        is_after_idx = (self.term_structure >= b).nonzero()
+        start_idx = torch.max(is_before_idx) if len(is_before_idx) else 0
+        end_idx = torch.min(is_after_idx) if len(is_after_idx) else len(self.term_structure)
+        used_term_structure = self.term_structure[start_idx: end_idx]
         if structure is not None:
-            used_coefs = structure[is_in_segment[:-1]]
+            used_coefs = structure[start_idx: min(end_idx, len(structure))]
         else:
             used_coefs = None
 
         if a not in used_term_structure:
-            used_term_structure = torch.nn.functional.pad(used_term_structure, (1, 0), "constant", a)
+            if a > used_term_structure[0]:
+                used_term_structure[0] = a
+            else:
+                used_term_structure = torch.nn.functional.pad(used_term_structure, (1, 0), "constant", a)
             if a < self.term_structure[0] and used_coefs is not None:
-                    used_coefs = torch.nn.functional.pad(used_coefs, (1, 0), "constant", used_coefs[0])
+                used_coefs = torch.nn.functional.pad(used_coefs, (1, 0), "constant", used_coefs[0])
 
         if b not in used_term_structure:
-            used_term_structure = torch.nn.functional.pad(used_term_structure, (0, 1), "constant", b)
+            if b < used_term_structure[-1]:
+                used_term_structure[-1] = b
+            else:
+                used_term_structure = torch.nn.functional.pad(used_term_structure, (0, 1), "constant", b)
             if b > self.term_structure[-1] and used_coefs is not None:
                 used_coefs = torch.nn.functional.pad(used_coefs, (1, 0), "constant", used_coefs[-1])
 
@@ -251,7 +260,7 @@ def test_lgm(test_case, test_name="test"):
     print(f"DF 2-4: {df_24}")
     print('\n\n')
 
-    res = lgm.get_caplet_greeks(1, 2, 0.01)
+    res = lgm.get_caplet_greeks(1, 1.25, 0.01)
     print(res)
     print('\n\n')
 
@@ -269,10 +278,10 @@ def run_tests():
         'n_paths': 10000
     }
 
-    test_lgm(case_1, "Flat curve, no vol")
+    # test_lgm(case_1, "Flat curve, no vol")
     # flat curve, add vol
     case_2 = deepcopy(case_1)
-    case_2['sigma_structure'] = np.ones(4) * 1e-3
+    case_2['sigma_structure'] = np.ones(4) * 1e-2
     test_lgm(case_2, f"Flat curve, vol = {case_2['sigma_structure'][0]}")
 
     # step function m, no vol

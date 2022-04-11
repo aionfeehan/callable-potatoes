@@ -37,11 +37,11 @@ async def multithread_main(threads=8):
 
 async def main():
     start = time.time()
-    n_total_requests = 100
-    res = await test_multiple_requests("http://localhost:8081/price", n_total_requests)
+    n_total_requests = 20
+    res = await test_multiple_requests("http://raspberrypi.local:8081/price", n_total_requests)
     end = time.time()
     total_time = round(end - start, 2)
-    print(f'Handled {n_total_requests} requests from 1 job in {total_time} seconds')
+    print(f'Handled {n_total_requests} requests {total_time} seconds')
     print(json.loads(res[0]))
 
 if __name__ == '__main__':
